@@ -519,7 +519,6 @@ static CDVWKInAppBrowser* instance = nil;
     )){
         useBeforeLoad = YES;
     }
-    NSLog(useBeforeLoad ? @"Yes" : @"No");
 
     // When beforeload, on first URL change, initiate JS callback. Only after the beforeload event, continue.
     if (_waitForBeforeload && useBeforeLoad) {
