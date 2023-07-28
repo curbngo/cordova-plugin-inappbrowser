@@ -76,6 +76,7 @@ import org.apache.cordova.PluginResult;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.lang.NumberFormatException;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -119,10 +120,12 @@ public class InAppBrowser extends CordovaPlugin {
     private static final String FOOTER_COLOR = "footercolor";
     private static final String BEFORELOAD = "beforeload";
     private static final String FULLSCREEN = "fullscreen";
+    private static final String OFFSET_X = "offsetX";
+    private static final String OFFSET_Y = "offsetY";
+    private static final String WIDTH = "width";
+    private static final String HEIGHT = "height";
 
-    private static final int TOOLBAR_HEIGHT = 48;
-
-    private static final List customizableOptions = Arrays.asList(CLOSE_BUTTON_CAPTION, TOOLBAR_COLOR, NAVIGATION_COLOR, CLOSE_BUTTON_COLOR, FOOTER_COLOR);
+    private static final List customizableOptions = Arrays.asList(CLOSE_BUTTON_CAPTION, TOOLBAR_COLOR, NAVIGATION_COLOR, CLOSE_BUTTON_COLOR, FOOTER_COLOR, OFFSET_X, OFFSET_Y, WIDTH, HEIGHT);
 
     private InAppBrowserDialog dialog;
     private WebView inAppWebView;
@@ -152,6 +155,10 @@ public class InAppBrowser extends CordovaPlugin {
     private boolean fullscreen = true;
     private String[] allowedSchemes;
     private InAppBrowserClient currentClient;
+    private int offsetX = 0;
+    private int offsetY = 0;
+    private int width = 0;
+    private int height = 0;
 
     /**
      * Executes the request and returns PluginResult.
@@ -623,6 +630,15 @@ public class InAppBrowser extends CordovaPlugin {
         return this;
     }
 
+    private int parseIntWithDefault(String s, int def) {
+        try {
+            return Integer.parseInt(s);
+        }
+        catch (NumberFormatException e) {
+            return def;
+        }
+    }
+
     /**
      * Display a new browser with the specified URL.
      *
@@ -716,6 +732,22 @@ public class InAppBrowser extends CordovaPlugin {
             if (fullscreenSet != null) {
                 fullscreen = fullscreenSet.equals("yes") ? true : false;
             }
+            String offsetXSet = features.get(OFFSET_X);
+            if (offsetXSet != null) {
+                offsetX = parseIntWithDefault(offsetXSet, 0);
+            }
+            String offsetYSet = features.get(OFFSET_Y);
+            if (offsetYSet != null) {
+                offsetY = parseIntWithDefault(offsetYSet, 0);
+            }
+            String widthSet = features.get(WIDTH);
+            if (widthSet != null) {
+                width = parseIntWithDefault(widthSet, 0);
+            }
+            String heightSet = features.get(HEIGHT);
+            if (heightSet != null) {
+                height = parseIntWithDefault(heightSet, 0);
+            }
         }
 
         final CordovaWebView thatWebView = this.webView;
@@ -797,6 +829,20 @@ public class InAppBrowser extends CordovaPlugin {
                 dialog.setCancelable(true);
                 dialog.setInAppBroswer(getInAppBrowser());
 
+                Window window = dialog.getWindow();
+                WindowManager.LayoutParams wlp = window.getAttributes();
+                wlp.gravity = Gravity.TOP | Gravity.LEFT;
+                if(width > 0){
+                    wlp.width = this.dpToPixels(width);
+                }
+                if(height > 0){
+                    wlp.height = this.dpToPixels(height);
+                }
+                window.setFlags(WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL);
+                window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+                window.setAttributes(wlp);
+/*
                 // Main container layout
                 LinearLayout main = new LinearLayout(cordova.getActivity());
                 main.setOrientation(LinearLayout.VERTICAL);
@@ -916,6 +962,7 @@ public class InAppBrowser extends CordovaPlugin {
 
                 View footerClose = createCloseButton(7);
                 footer.addView(footerClose);
+*/
 
                 // WebView
                 inAppWebView = new WebView(cordova.getActivity());
@@ -1027,10 +1074,11 @@ public class InAppBrowser extends CordovaPlugin {
                 inAppWebView.getSettings().setUseWideViewPort(useWideViewPort);
                 // Multiple Windows set to true to mitigate Chromium security bug.
                 //  See: https://bugs.chromium.org/p/chromium/issues/detail?id=1083819
-                inAppWebView.getSettings().setSupportMultipleWindows(true);
+                //inAppWebView.getSettings().setSupportMultipleWindows(true);
                 inAppWebView.requestFocus();
                 inAppWebView.requestFocusFromTouch();
 
+                /*
                 // Add the back and forward buttons to our action button container layout
                 actionButtonContainer.addView(back);
                 actionButtonContainer.addView(forward);
@@ -1054,14 +1102,21 @@ public class InAppBrowser extends CordovaPlugin {
                 if (showFooter) {
                     webViewLayout.addView(footer);
                 }
+                */
 
                 WindowManager.LayoutParams lp = new WindowManager.LayoutParams();
                 lp.copyFrom(dialog.getWindow().getAttributes());
-                lp.width = WindowManager.LayoutParams.MATCH_PARENT;
-                lp.height = WindowManager.LayoutParams.MATCH_PARENT;
+                lp.x = this.dpToPixels(offsetX);
+                lp.y = this.dpToPixels(offsetY);
+                if(width > 0){
+                    lp.width = this.dpToPixels(width);
+                }
+                if(height > 0){
+                    lp.height = this.dpToPixels(height);
+                }
 
                 if (dialog != null) {
-                    dialog.setContentView(main);
+                    dialog.setContentView(inAppWebView);
                     dialog.show();
                     dialog.getWindow().setAttributes(lp);
                 }
@@ -1356,9 +1411,9 @@ public class InAppBrowser extends CordovaPlugin {
             }
 
             // Update the UI if we haven't already
-            if (!newloc.equals(edittext.getText().toString())) {
-                edittext.setText(newloc);
-            }
+            //if (!newloc.equals(edittext.getText().toString())) {
+            //    edittext.setText(newloc);
+            //}
 
             try {
                 JSONObject obj = new JSONObject();
