@@ -169,12 +169,18 @@ public class InAppChromeClient extends WebChromeClient {
                     @Override
                     public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                         inAppWebView.loadUrl(request.getUrl().toString());
+                        // The temporary WebView served its purpose (capturing the target URL).
+                        // Destroy it immediately so it doesn't accumulate with each _blank click.
+                        view.stopLoading();
+                        view.destroy();
                         return true;
                     }
 
                     @Override
                     public boolean shouldOverrideUrlLoading(WebView view, String url) {
                         inAppWebView.loadUrl(url);
+                        view.stopLoading();
+                        view.destroy();
                         return true;
                     }
                 };
