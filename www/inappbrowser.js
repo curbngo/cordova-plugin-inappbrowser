@@ -45,6 +45,13 @@
                 } else {
                     this.channels[event.type].fire(event);
                 }
+                if (event.type === 'exit') {
+                    // Clear all channel subscribers so callers don't need to manually
+                    // removeEventListener on every listener they added.
+                    for (var ch in this.channels) {
+                        this.channels[ch].handlers = {};
+                    }
+                }
             }
         },
         _loadAfterBeforeload: function (strUrl) {

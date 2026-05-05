@@ -148,6 +148,17 @@ public class InAppBrowser extends CordovaPlugin {
     private String[] allowedSchemes;
     private InAppBrowserClient currentClient;
 
+    // Cached reflection handles used by the Cordova compatibility shims.
+    // Looked up once and reused to avoid repeated, expensive getMethod() calls.
+    private static volatile Method sCachedIsUrlWhiteListedMethod;
+    private static volatile boolean sCachedIsUrlWhiteListedChecked = false;
+    private static volatile Method sCachedGetPluginManagerMethod;
+    private static volatile boolean sCachedGetPluginManagerChecked = false;
+    private static volatile Method sCachedShouldAllowNavigationMethod;
+    private static volatile boolean sCachedShouldAllowNavigationChecked = false;
+    private static volatile Field sCachedPluginManagerField;
+    private static volatile boolean sCachedPluginManagerFieldChecked = false;
+
     /**
      * Executes the request and returns PluginResult.
      *
@@ -158,6 +169,12 @@ public class InAppBrowser extends CordovaPlugin {
      */
     public boolean execute(String action, CordovaArgs args, final CallbackContext callbackContext) throws JSONException {
         if (action.equals("open")) {
+            if (this.callbackContext != null) {
+                // A second open() arrived before the first session sent its exit event.
+                // Log a warning so it is visible during development; the new session proceeds
+                // and the old callbackContext is replaced (its events will be silently dropped).
+                LOG.w(LOG_TAG, "InAppBrowser: open() called while a session is already active. Previous session events will be dropped.");
+            }
             this.callbackContext = callbackContext;
             final String url = args.getString(0);
             String t = args.optString(1);
@@ -186,29 +203,52 @@ public class InAppBrowser extends CordovaPlugin {
                             shouldAllowNavigation = true;
                         }
                         if (shouldAllowNavigation == null) {
-                            try {
-                                Method iuw = Config.class.getMethod("isUrlWhiteListed", String.class);
-                                shouldAllowNavigation = (Boolean)iuw.invoke(null, url);
-                            } catch (NoSuchMethodException e) {
-                                LOG.d(LOG_TAG, e.getLocalizedMessage());
-                            } catch (IllegalAccessException e) {
-                                LOG.d(LOG_TAG, e.getLocalizedMessage());
-                            } catch (InvocationTargetException e) {
-                                LOG.d(LOG_TAG, e.getLocalizedMessage());
+                            if (!sCachedIsUrlWhiteListedChecked) {
+                                try {
+                                    sCachedIsUrlWhiteListedMethod = Config.class.getMethod("isUrlWhiteListed", String.class);
+                                } catch (NoSuchMethodException e) {
+                                    LOG.d(LOG_TAG, e.getLocalizedMessage());
+                                }
+                                sCachedIsUrlWhiteListedChecked = true;
+                            }
+                            if (sCachedIsUrlWhiteListedMethod != null) {
+                                try {
+                                    shouldAllowNavigation = (Boolean)sCachedIsUrlWhiteListedMethod.invoke(null, url);
+                                } catch (IllegalAccessException e) {
+                                    LOG.d(LOG_TAG, e.getLocalizedMessage());
+                                } catch (InvocationTargetException e) {
+                                    LOG.d(LOG_TAG, e.getLocalizedMessage());
+                                }
                             }
                         }
                         if (shouldAllowNavigation == null) {
-                            try {
-                                Method gpm = webView.getClass().getMethod("getPluginManager");
-                                PluginManager pm = (PluginManager)gpm.invoke(webView);
-                                Method san = pm.getClass().getMethod("shouldAllowNavigation", String.class);
-                                shouldAllowNavigation = (Boolean)san.invoke(pm, url);
-                            } catch (NoSuchMethodException e) {
-                                LOG.d(LOG_TAG, e.getLocalizedMessage());
-                            } catch (IllegalAccessException e) {
-                                LOG.d(LOG_TAG, e.getLocalizedMessage());
-                            } catch (InvocationTargetException e) {
-                                LOG.d(LOG_TAG, e.getLocalizedMessage());
+                            if (!sCachedGetPluginManagerChecked) {
+                                try {
+                                    sCachedGetPluginManagerMethod = webView.getClass().getMethod("getPluginManager");
+                                } catch (NoSuchMethodException e) {
+                                    LOG.d(LOG_TAG, e.getLocalizedMessage());
+                                }
+                                sCachedGetPluginManagerChecked = true;
+                            }
+                            if (sCachedGetPluginManagerMethod != null) {
+                                try {
+                                    PluginManager pm = (PluginManager)sCachedGetPluginManagerMethod.invoke(webView);
+                                    if (!sCachedShouldAllowNavigationChecked) {
+                                        try {
+                                            sCachedShouldAllowNavigationMethod = pm.getClass().getMethod("shouldAllowNavigation", String.class);
+                                        } catch (NoSuchMethodException e) {
+                                            LOG.d(LOG_TAG, e.getLocalizedMessage());
+                                        }
+                                        sCachedShouldAllowNavigationChecked = true;
+                                    }
+                                    if (sCachedShouldAllowNavigationMethod != null) {
+                                        shouldAllowNavigation = (Boolean)sCachedShouldAllowNavigationMethod.invoke(pm, url);
+                                    }
+                                } catch (IllegalAccessException e) {
+                                    LOG.d(LOG_TAG, e.getLocalizedMessage());
+                                } catch (InvocationTargetException e) {
+                                    LOG.d(LOG_TAG, e.getLocalizedMessage());
+                                }
                             }
                         }
                         // load in webview
@@ -446,8 +486,7 @@ public class InAppBrowser extends CordovaPlugin {
      */
     public String openExternal(String url) {
         try {
-            Intent intent = null;
-            intent = new Intent(Intent.ACTION_VIEW);
+            Intent intent = new Intent(Intent.ACTION_VIEW);
             // Omitting the MIME type for file: URLs causes "No Activity found to handle Intent".
             // Adding the MIME type to http: URLs causes them to not be handled by the downloader.
             Uri uri = Uri.parse(url);
@@ -457,8 +496,16 @@ public class InAppBrowser extends CordovaPlugin {
                 intent.setData(uri);
             }
             intent.putExtra(Browser.EXTRA_APPLICATION_ID, cordova.getActivity().getPackageName());
-            // CB-10795: Avoid circular loops by preventing it from opening in the current app
-            this.openExternalExcludeCurrentApp(intent);
+            // CB-10795: Avoid circular loops by preventing it from opening in the current app.
+            // queryIntentActivities() is an IPC call that can be slow; run it on a background
+            // thread and post startActivity() back to the UI thread.
+            final Intent finalIntent = intent;
+            cordova.getThreadPool().execute(new Runnable() {
+                @Override
+                public void run() {
+                    openExternalExcludeCurrentApp(finalIntent);
+                }
+            });
             return "";
             // not catching FileUriExposedException explicitly because buildtools<24 doesn't know about it
         } catch (java.lang.RuntimeException e) {
@@ -470,14 +517,16 @@ public class InAppBrowser extends CordovaPlugin {
     /**
      * Opens the intent, providing a chooser that excludes the current app to avoid
      * circular loops.
+     *
+     * Must be called from a background thread. startActivity() is dispatched to the UI thread.
      */
-    private void openExternalExcludeCurrentApp(Intent intent) {
+    private void openExternalExcludeCurrentApp(final Intent intent) {
         String currentPackage = cordova.getActivity().getPackageName();
         boolean hasCurrentPackage = false;
 
         PackageManager pm = cordova.getActivity().getPackageManager();
         List<ResolveInfo> activities = pm.queryIntentActivities(intent, 0);
-        ArrayList<Intent> targetIntents = new ArrayList<Intent>();
+        final ArrayList<Intent> targetIntents = new ArrayList<Intent>();
 
         for (ResolveInfo ri : activities) {
             if (!currentPackage.equals(ri.activityInfo.packageName)) {
@@ -490,21 +539,26 @@ public class InAppBrowser extends CordovaPlugin {
             }
         }
 
-        // If the current app package isn't a target for this URL, then use
-        // the normal launch behavior
-        if (hasCurrentPackage == false || targetIntents.size() == 0) {
-            this.cordova.getActivity().startActivity(intent);
-        }
-        // If there's only one possible intent, launch it directly
-        else if (targetIntents.size() == 1) {
-            this.cordova.getActivity().startActivity(targetIntents.get(0));
-        }
-        // Otherwise, show a custom chooser without the current app listed
-        else if (targetIntents.size() > 0) {
-            Intent chooser = Intent.createChooser(targetIntents.remove(targetIntents.size()-1), null);
-            chooser.putExtra(Intent.EXTRA_INITIAL_INTENTS, targetIntents.toArray(new Parcelable[] {}));
-            this.cordova.getActivity().startActivity(chooser);
-        }
+        final boolean finalHasCurrentPackage = hasCurrentPackage;
+        cordova.getActivity().runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                // If the current app package isn't a target for this URL, use normal launch behavior
+                if (finalHasCurrentPackage == false || targetIntents.size() == 0) {
+                    cordova.getActivity().startActivity(intent);
+                }
+                // If there's only one possible intent, launch it directly
+                else if (targetIntents.size() == 1) {
+                    cordova.getActivity().startActivity(targetIntents.get(0));
+                }
+                // Otherwise, show a custom chooser without the current app listed
+                else if (targetIntents.size() > 0) {
+                    Intent chooser = Intent.createChooser(targetIntents.remove(targetIntents.size()-1), null);
+                    chooser.putExtra(Intent.EXTRA_INITIAL_INTENTS, targetIntents.toArray(new Parcelable[] {}));
+                    cordova.getActivity().startActivity(chooser);
+                }
+            }
+        });
     }
 
     /**
@@ -534,9 +588,21 @@ public class InAppBrowser extends CordovaPlugin {
                             inAppWebView.destroyDrawingCache();
                             inAppWebView.destroy();
                             inAppWebView = null;
+                            // Break the retain chain: InAppBrowserClient holds a ref to the
+                            // outer InAppBrowser and to CordovaWebView.
+                            currentClient = null;
+                            // Release any pending file-chooser callback so the system can
+                            // GC it; passing null signals "no result".
+                            if (mUploadCallback != null) {
+                                mUploadCallback.onReceiveValue(null);
+                                mUploadCallback = null;
+                            }
                         }
                     }
                 });
+                // CB-10395 Flush cookies to disk once on close rather than after every page load.
+                CookieManager.getInstance().flush();
+
                 // NB: From SDK 19: "If you call methods on WebView from any thread
                 // other than your app's UI thread, it can cause unexpected results."
                 // http://developer.android.com/guide/webapps/migrating.html#Threads
@@ -718,17 +784,16 @@ public class InAppBrowser extends CordovaPlugin {
         // Create dialog in new thread
         Runnable runnable = new Runnable() {
             /**
-             * Convert our DIP units to Pixels
-             *
-             * @return int
+             * Convert our DIP units to Pixels.
+             * DisplayMetrics is cached on first call to avoid repeated getResources() calls
+             * during the many dpToPixels() invocations that happen during UI setup.
              */
+            private android.util.DisplayMetrics _dm = null;
             private int dpToPixels(int dipValue) {
-                int value = (int) TypedValue.applyDimension( TypedValue.COMPLEX_UNIT_DIP,
-                        (float) dipValue,
-                        cordova.getActivity().getResources().getDisplayMetrics()
-                );
-
-                return value;
+                if (_dm == null) {
+                    _dm = cordova.getActivity().getResources().getDisplayMetrics();
+                }
+                return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, (float) dipValue, _dm);
             }
 
             private View createCloseButton(int id) {
@@ -994,7 +1059,6 @@ public class InAppBrowser extends CordovaPlugin {
                 CookieManager.getInstance().setAcceptThirdPartyCookies(inAppWebView,true);
 
                 inAppWebView.loadUrl(url);
-                inAppWebView.setId(Integer.valueOf(6));
                 inAppWebView.getSettings().setLoadWithOverviewMode(true);
                 inAppWebView.getSettings().setUseWideViewPort(useWideViewPort);
                 // Multiple Windows set to true to mitigate Chromium security bug.
@@ -1339,11 +1403,9 @@ public class InAppBrowser extends CordovaPlugin {
         public void onPageFinished(WebView view, String url) {
             super.onPageFinished(view, url);
 
-            // Set the namespace for postMessage()
-            injectDeferredObject("window.webkit={messageHandlers:{cordova_iab:cordova_iab}}", null);
-
-            // CB-10395 InAppBrowser's WebView not storing cookies reliable to local device storage
-            CookieManager.getInstance().flush();
+            // Set the namespace for postMessage() only if not already present (avoids a
+            // redundant evaluateJavascript round-trip on every page load).
+            injectDeferredObject("if(!window.webkit){window.webkit={messageHandlers:{cordova_iab:cordova_iab}}}", null);
 
             // https://issues.apache.org/jira/browse/CB-11248
             view.clearFocus();
@@ -1422,27 +1484,42 @@ public class InAppBrowser extends CordovaPlugin {
         @Override
         public void onReceivedHttpAuthRequest(WebView view, HttpAuthHandler handler, String host, String realm) {
 
-            // Check if there is some plugin which can resolve this auth challenge
+            // Check if there is some plugin which can resolve this auth challenge.
+            // Both the Method and Field lookups are cached after the first call.
             PluginManager pluginManager = null;
-            try {
-                Method gpm = webView.getClass().getMethod("getPluginManager");
-                pluginManager = (PluginManager)gpm.invoke(webView);
-            } catch (NoSuchMethodException e) {
-                LOG.d(LOG_TAG, e.getLocalizedMessage());
-            } catch (IllegalAccessException e) {
-                LOG.d(LOG_TAG, e.getLocalizedMessage());
-            } catch (InvocationTargetException e) {
-                LOG.d(LOG_TAG, e.getLocalizedMessage());
+            if (!sCachedGetPluginManagerChecked) {
+                try {
+                    sCachedGetPluginManagerMethod = webView.getClass().getMethod("getPluginManager");
+                } catch (NoSuchMethodException e) {
+                    LOG.d(LOG_TAG, e.getLocalizedMessage());
+                }
+                sCachedGetPluginManagerChecked = true;
+            }
+            if (sCachedGetPluginManagerMethod != null) {
+                try {
+                    pluginManager = (PluginManager)sCachedGetPluginManagerMethod.invoke(webView);
+                } catch (IllegalAccessException e) {
+                    LOG.d(LOG_TAG, e.getLocalizedMessage());
+                } catch (InvocationTargetException e) {
+                    LOG.d(LOG_TAG, e.getLocalizedMessage());
+                }
             }
 
             if (pluginManager == null) {
-                try {
-                    Field pmf = webView.getClass().getField("pluginManager");
-                    pluginManager = (PluginManager)pmf.get(webView);
-                } catch (NoSuchFieldException e) {
-                    LOG.d(LOG_TAG, e.getLocalizedMessage());
-                } catch (IllegalAccessException e) {
-                    LOG.d(LOG_TAG, e.getLocalizedMessage());
+                if (!sCachedPluginManagerFieldChecked) {
+                    try {
+                        sCachedPluginManagerField = webView.getClass().getField("pluginManager");
+                    } catch (NoSuchFieldException e) {
+                        LOG.d(LOG_TAG, e.getLocalizedMessage());
+                    }
+                    sCachedPluginManagerFieldChecked = true;
+                }
+                if (sCachedPluginManagerField != null) {
+                    try {
+                        pluginManager = (PluginManager)sCachedPluginManagerField.get(webView);
+                    } catch (IllegalAccessException e) {
+                        LOG.d(LOG_TAG, e.getLocalizedMessage());
+                    }
                 }
             }
 
